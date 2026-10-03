@@ -65,17 +65,25 @@ Textures can be applied to meshes to add surface detail and improve the visual a
 
 A skybox surrounds the scene with a textured environment, providing an atmospheric background and making the rendered world feel more immersive.
 
+## Vendors
+
+To build and run the project, you have a vendors folder:
+
+* **Assimp**
+* **GLFW3**
+* **GLM**
+* **stb_image**
+
 ## Requirements
 
 To build and run the project, you need:
 
-* **Visual Studio 2026**
-* A compiler with **C++20** support
-* **Vulkan SDK**
+* **Visual Studio**
+* A compiler with atleast **C++17** support
+* **Vulkan SDK 1.4**
 * A Vulkan-compatible GPU and driver
-* **GLFW3**
-* **GLM**
 
+  
 Make sure the Vulkan SDK and required dependencies are correctly installed and available to the build environment.
 
 ## Build
