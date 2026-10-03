@@ -21,7 +21,7 @@ The renderer provides a flexible foundation for real-time 3D graphics and suppor
 
 ### Frame 1
 
-![Frame 1](screenshots/frame1.png)
+![Frame 1](screenshots/frame1.jpg)
 
 ### Frame 2
 
