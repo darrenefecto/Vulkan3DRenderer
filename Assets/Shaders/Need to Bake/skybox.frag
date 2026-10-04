@@ -1,10 +1,10 @@
-#version 450
+#version 460
 
-layout(set = 1, binding = 0) uniform samplerCube skyboxMap;
-
-layout(location = 0) in vec3 dir;
+layout(location = 0) in vec3 vDir;
 layout(location = 0) out vec4 outColor;
 
+layout(set = 1, binding = 0) uniform samplerCube skybox;
+
 void main() {
-    outColor = vec4(texture(skyboxMap, normalize(dir)).rgb, 1.0);
+    outColor = vec4(texture(skybox, vDir).rgb, 1.0);
 }

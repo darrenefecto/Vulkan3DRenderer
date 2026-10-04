@@ -1,5 +1,8 @@
 glslc belongs to VulkanSDK, for instance my path: C:\VulkanSDK\<version>\Bin\glslc.exe
 
+C:\VulkanSDK\1.4.363.0\Bin\glslc.exe
+
+
 glslc Assets/Shaders/mesh.vert -o Assets/Shaders/mesh.vert.spv
 glslc Assets/Shaders/mesh.frag -o Assets/Shaders/mesh.frag.spv
 glslc Assets/Shaders/skybox.vert -o Assets/Shaders/skybox.vert.spv

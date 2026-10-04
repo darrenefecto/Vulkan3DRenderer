@@ -175,6 +175,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Vulkan3DRenderer\Include\Vulkan3DRenderer\Camera.h" />
+    <ClInclude Include="Vulkan3DRenderer\Include\Vulkan3DRenderer\Light.h" />
     <ClInclude Include="Vulkan3DRenderer\Include\Vulkan3DRenderer\Mesh.h" />
     <ClInclude Include="Vulkan3DRenderer\Include\Vulkan3DRenderer\Renderer.h" />
     <ClInclude Include="Vulkan3DRenderer\Include\Vulkan3DRenderer\Texture.h" />

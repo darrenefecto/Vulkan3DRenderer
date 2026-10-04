@@ -21,7 +21,7 @@ void Context::init(GLFWwindow* win, bool validation) {
 
 void Context::createInstance(bool validation) {
     VkApplicationInfo app{ VK_STRUCTURE_TYPE_APPLICATION_INFO };
-    app.pApplicationName = "Vulkan Mesh Renderer";
+    app.pApplicationName = "Vulkan PBR Renderer";
     app.apiVersion = VK_API_VERSION_1_4; // needs Vulkan SDK/loader >= 1.4
 
     uint32_t glfwCount = 0;
@@ -131,6 +131,9 @@ void Context::pickPhysicalDevice() {
     std::cout << "GPU: " << deviceProps.deviceName << " (Vulkan "
         << VK_VERSION_MAJOR(deviceProps.apiVersion) << "."
         << VK_VERSION_MINOR(deviceProps.apiVersion) << ")\n";
+
+    if (deviceProps.limits.maxPushConstantsSize < 128)
+        throw std::runtime_error("GPU does not support the required 128-byte push constants");
 }
 
 void Context::createDevice() {
@@ -386,12 +389,13 @@ void Context::createImage(uint32_t w, uint32_t h, uint32_t mipLevels, uint32_t l
 }
 
 VkImageView Context::createImageView(VkImage image, VkFormat format, VkImageAspectFlags aspect,
-    uint32_t mipLevels, VkImageViewType type, uint32_t layers) const {
+    uint32_t mipLevels, VkImageViewType type, uint32_t layers,
+    uint32_t baseLayer, uint32_t baseMip) const {
     VkImageViewCreateInfo vi{ VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO };
     vi.image = image;
     vi.viewType = type;
     vi.format = format;
-    vi.subresourceRange = { aspect, 0, mipLevels, 0, layers };
+    vi.subresourceRange = { aspect, baseMip, mipLevels, baseLayer, layers };
     VkImageView view;
     VK_CHECK(vkCreateImageView(device, &vi, nullptr, &view));
     return view;

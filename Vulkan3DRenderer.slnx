@@ -3,5 +3,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="Vulkan3DRenderer.vcxproj" />
+  <Project Path="Vulkan3DRenderer.vcxproj" Id="42b9ee33-5a32-4aca-ad0d-5604ff854e6e" />
 </Solution>

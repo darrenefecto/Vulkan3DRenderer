@@ -1,4 +1,10 @@
 #pragma once
+#ifndef GLM_FORCE_DEPTH_ZERO_TO_ONE
+#define GLM_FORCE_DEPTH_ZERO_TO_ONE
+#endif
+#ifndef GLM_FORCE_RADIANS
+#define GLM_FORCE_RADIANS
+#endif
 #define GLFW_INCLUDE_VULKAN
 #include <GLFW/glfw3.h>
 #include <vector>
@@ -49,7 +55,7 @@ public:
         VkImage& image, VkDeviceMemory& memory) const;
     VkImageView createImageView(VkImage image, VkFormat format, VkImageAspectFlags aspect,
         uint32_t mipLevels, VkImageViewType type = VK_IMAGE_VIEW_TYPE_2D,
-        uint32_t layers = 1) const;
+        uint32_t layers = 1, uint32_t baseLayer = 0, uint32_t baseMip = 0) const;
     void transitionImageLayout(VkImage image, VkImageLayout oldL, VkImageLayout newL,
         uint32_t mipLevels, uint32_t layers,
         VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT);

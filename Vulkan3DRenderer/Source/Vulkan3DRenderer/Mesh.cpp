@@ -20,6 +20,7 @@ void Model::load(Context& c, const std::string& path) {
     Assimp::Importer importer;
     const aiScene* scene = importer.ReadFile(path,
         aiProcess_Triangulate | aiProcess_GenSmoothNormals | aiProcess_FlipUVs |
+        aiProcess_CalcTangentSpace |
         aiProcess_JoinIdenticalVertices | aiProcess_OptimizeMeshes | aiProcess_OptimizeGraph);
     if (!scene || !scene->mRootNode)
         throw std::runtime_error(std::string("Assimp failed: ") + importer.GetErrorString());
@@ -27,7 +28,9 @@ void Model::load(Context& c, const std::string& path) {
     size_t slash = path.find_last_of("/\\");
     directory = (slash == std::string::npos) ? "." : path.substr(0, slash);
 
-    defaultWhite.createSolid(c, 255, 255, 255, 255);
+    defaultWhite.createSolid(c, 255, 255, 255, 255, /*srgb=*/true);
+    defaultNormal.createSolid(c, 128, 128, 255, 255, /*srgb=*/false); // flat normal
+    defaultBlack.createSolid(c, 0, 0, 0, 255, /*srgb=*/false);
 
     materials.resize(scene->mNumMaterials);
     for (unsigned i = 0; i < scene->mNumMaterials; i++)
@@ -92,6 +95,19 @@ void Model::processMesh(const void* meshPtr, const glm::mat4& transform) {
             };
         }
 
+        if (meshData->HasTangentsAndBitangents()) {
+            const aiVector3D& t = meshData->mTangents[i];
+            const aiVector3D& b = meshData->mBitangents[i];
+            const aiVector3D& n = meshData->mNormals[i];
+            // bitangent sign: reconstruct handedness so the shader can do B = cross(N,T) * w
+            aiVector3D ct = n ^ t; // cross(n, t)
+            float w = ((ct * b) < 0.0f) ? -1.0f : 1.0f; // dot(cross(n,t), b)
+            v.tangent = { t.x, t.y, t.z, w };
+        }
+        else {
+            v.tangent = { 1.0f, 0.0f, 0.0f, 1.0f };
+        }
+
         mesh.vertices.push_back(v);
 
         glm::vec4 wp = transform * glm::vec4(v.pos, 1.0f);
@@ -108,83 +124,127 @@ void Model::processMesh(const void* meshPtr, const glm::mat4& transform) {
     meshes.push_back(std::move(mesh));
 }
 
-void Model::loadMaterial(int index, const void* matPtr, const void* scenePtr) {
-    auto* aiMat = (const aiMaterial*)matPtr;
-    Material& m = materials[index];
-    m.name = aiMat->GetName().C_Str();
-
-    aiColor4D color;
-    if (aiGetMaterialColor(aiMat, AI_MATKEY_COLOR_DIFFUSE, &color) == AI_SUCCESS)
-        m.data.baseColor = { color.r, color.g, color.b, color.a };
-    if (aiGetMaterialColor(aiMat, AI_MATKEY_BASE_COLOR, &color) == AI_SUCCESS)
-        m.data.baseColor = { color.r, color.g, color.b, color.a };
-
-    float shininess;
-    if (aiGetMaterialFloat(aiMat, AI_MATKEY_SHININESS, &shininess) == AI_SUCCESS && shininess > 0.0f)
-        m.data.roughness = glm::clamp(sqrtf(2.0f / (shininess + 2.0f)), 0.05f, 1.0f);
-
-    aiString texPath;
-    bool hasTex = aiMat->GetTexture(aiTextureType_BASE_COLOR, 0, &texPath) == AI_SUCCESS ||
-        aiMat->GetTexture(aiTextureType_DIFFUSE, 0, &texPath) == AI_SUCCESS;
-    if (hasTex) {
-        const char* p = texPath.C_Str();
-        if (p[0] == '*') { // embedded texture
-            m.albedo = loadEmbeddedTexture(scenePtr, atoi(p + 1));
-        }
-        else {
-            std::string full = directory + "/" + std::string(p);
-            std::replace(full.begin(), full.end(), '\\', '/');
-            m.albedo = loadTexture(full);
-        }
-        if (m.albedo) m.data.hasTexture = 1.0f;
-    }
-    if (!m.albedo) m.albedo = &defaultWhite;
-}
-
-Texture2D* Model::loadTexture(const std::string& path) {
-    auto it = textureCache.find(path);
+// Loads one texture slot; resolves external files and glTF embedded ("*N") textures.
+Texture2D* Model::loadTexture(const std::string& path, bool srgb) {
+    std::string key = path + (srgb ? "#srgb" : "#linear");
+    auto it = textureCache.find(key);
     if (it != textureCache.end()) return it->second.get();
     auto tex = std::make_unique<Texture2D>();
     try {
-        tex->createFromFile(*ctx, path);
+        tex->createFromFile(*ctx, path, srgb);
     }
     catch (const std::exception& e) {
-        std::cerr << e.what() << " (using white)\n";
-        return nullptr;
-    }
-    Texture2D* raw = tex.get();
-    textureCache[path] = std::move(tex);
-    return raw;
-}
-
-Texture2D* Model::loadEmbeddedTexture(const void* scenePtr, int index) {
-    auto* scene = (const aiScene*)scenePtr;
-    if (index < 0 || index >= (int)scene->mNumTextures) return nullptr;
-    const aiTexture* aiTex = scene->mTextures[index];
-    std::string key = std::string("embedded_") + std::to_string(index);
-    auto it = textureCache.find(key);
-    if (it != textureCache.end()) return it->second.get();
-
-    auto tex = std::make_unique<Texture2D>();
-    if (aiTex->mHeight == 0) { // compressed (png/jpg) blob
-        tex->createFromMemory(*ctx, aiTex->pcData, (int)aiTex->mWidth);
-    }
-    else {                   // raw BGRA data
-        std::vector<uint8_t> rgba(aiTex->mWidth * aiTex->mHeight * 4);
-        for (size_t i = 0; i < aiTex->mWidth * aiTex->mHeight; i++) {
-            rgba[i * 4 + 0] = aiTex->pcData[i].r;
-            rgba[i * 4 + 1] = aiTex->pcData[i].g;
-            rgba[i * 4 + 2] = aiTex->pcData[i].b;
-            rgba[i * 4 + 3] = aiTex->pcData[i].a;
-        }
-        // createFromPixels is private; go through a 1-call path via memory PNG not possible,
-        // so just fail gracefully and let the material use white.
-        std::cerr << "Uncompressed embedded texture not supported, using white\n";
+        std::cerr << e.what() << " (using default)\n";
         return nullptr;
     }
     Texture2D* raw = tex.get();
     textureCache[key] = std::move(tex);
     return raw;
+}
+
+Texture2D* Model::loadEmbeddedTexture(const void* scenePtr, int index, bool srgb) {
+    auto* scene = (const aiScene*)scenePtr;
+    if (index < 0 || index >= (int)scene->mNumTextures) return nullptr;
+    const aiTexture* aiTex = scene->mTextures[index];
+    std::string key = std::string("embedded_") + std::to_string(index) + (srgb ? "#srgb" : "#linear");
+    auto it = textureCache.find(key);
+    if (it != textureCache.end()) return it->second.get();
+
+    auto tex = std::make_unique<Texture2D>();
+    if (aiTex->mHeight == 0) { // compressed (png/jpg) blob
+        tex->createFromMemory(*ctx, aiTex->pcData, (int)aiTex->mWidth, srgb);
+    }
+    else {
+        std::cerr << "Uncompressed embedded texture not supported, using default\n";
+        return nullptr;
+    }
+    Texture2D* raw = tex.get();
+    textureCache[key] = std::move(tex);
+    return raw;
+}
+
+void Model::loadMaterial(int index, const void* matPtr, const void* scenePtr) {
+    auto* aiMat = (const aiMaterial*)matPtr;
+    Material& m = materials[index];
+    m.name = aiMat->GetName().C_Str();
+
+    auto resolveTexture = [&](aiTextureType type, unsigned texIndex, bool srgb) -> Texture2D* {
+        aiString texPath;
+        if (aiMat->GetTexture(type, texIndex, &texPath) != AI_SUCCESS) return nullptr;
+        const char* p = texPath.C_Str();
+        if (p[0] == '*') return loadEmbeddedTexture(scenePtr, atoi(p + 1), srgb);
+        std::string full = directory + "/" + std::string(p);
+        std::replace(full.begin(), full.end(), '\\', '/');
+        return loadTexture(full, srgb);
+    };
+
+    // --- factors ---
+    aiColor4D color;
+    if (aiGetMaterialColor(aiMat, AI_MATKEY_COLOR_DIFFUSE, &color) == AI_SUCCESS)
+        m.data.baseColor = { color.r, color.g, color.b, color.a };
+    if (aiGetMaterialColor(aiMat, AI_MATKEY_BASE_COLOR, &color) == AI_SUCCESS) // glTF wins
+        m.data.baseColor = { color.r, color.g, color.b, color.a };
+
+    float f;
+    if (aiGetMaterialFloat(aiMat, AI_MATKEY_METALLIC_FACTOR, &f) == AI_SUCCESS)
+        m.data.params.x = f;
+    if (aiGetMaterialFloat(aiMat, AI_MATKEY_ROUGHNESS_FACTOR, &f) == AI_SUCCESS)
+        m.data.params.y = f;
+    else if (aiGetMaterialFloat(aiMat, AI_MATKEY_SHININESS, &f) == AI_SUCCESS && f > 0.0f)
+        m.data.params.y = glm::clamp(sqrtf(2.0f / (f + 2.0f)), 0.05f, 1.0f);
+
+    if (aiGetMaterialColor(aiMat, AI_MATKEY_COLOR_EMISSIVE, &color) == AI_SUCCESS)
+        m.data.emissive = { color.r, color.g, color.b, 1.0f };
+
+    // --- textures ---
+    if (Texture2D* t = resolveTexture(aiTextureType_BASE_COLOR, 0, true)) {
+        m.albedo = t; m.data.flags.x = 1.0f;
+    }
+    else if (Texture2D* t2 = resolveTexture(aiTextureType_DIFFUSE, 0, true)) {
+        m.albedo = t2; m.data.flags.x = 1.0f;
+    }
+
+    if (Texture2D* t = resolveTexture(aiTextureType_NORMALS, 0, false)) {
+        m.normal = t; m.data.flags.y = 1.0f;
+    }
+
+    // packed glTF metallic-roughness (g = roughness, b = metallic)
+#ifdef AI_MATKEY_GLTF_PBRMETALLICROUGHNESS_METALLICROUGHNESS_TEXTURE
+    {
+        aiString texPath;
+        if (aiMat->GetTexture(AI_MATKEY_GLTF_PBRMETALLICROUGHNESS_METALLICROUGHNESS_TEXTURE,
+                              &texPath) == AI_SUCCESS) {
+            const char* p = texPath.C_Str();
+            Texture2D* t = nullptr;
+            if (p[0] == '*') t = loadEmbeddedTexture(scenePtr, atoi(p + 1), false);
+            else {
+                std::string full = directory + "/" + std::string(p);
+                std::replace(full.begin(), full.end(), '\\', '/');
+                t = loadTexture(full, false);
+            }
+            if (t) { m.metallicRoughness = t; m.data.flags.z = 1.0f; }
+        }
+    }
+#endif
+
+    if (Texture2D* t = resolveTexture(aiTextureType_EMISSIVE, 0, true)) {
+        m.emissive = t; m.data.flags.w = 1.0f;
+    }
+    // emissive factor (m.data.emissive) still glows without a map:
+    // the shader multiplies by the map only when flags.w is set
+
+    if (Texture2D* t = resolveTexture(aiTextureType_LIGHTMAP, 0, false)) { // glTF occlusion
+        m.ao = t; m.data.params.w = 1.0f;
+    }
+
+    if (!m.albedo) m.albedo = &defaultWhite;
+    if (!m.normal) m.normal = &defaultNormal;
+    if (!m.metallicRoughness) m.metallicRoughness = &defaultWhite; // g=1,b=1 -> overridden by factors
+    if (!m.emissive) m.emissive = &defaultBlack;
+    if (!m.ao) m.ao = &defaultWhite;
+
+    // If no MR map: the map's neutral value (g=1,b=1) must not fight the factors,
+    // so the shader multiplies map * factor; defaultWhite keeps factors untouched.
 }
 
 void Model::createBuffers(Mesh& mesh) {
@@ -236,22 +296,30 @@ void Model::createDescriptors(Context& c, VkDescriptorPool pool, VkDescriptorSet
         vkUnmapMemory(c.device, m.uboMem);
 
         VkDescriptorBufferInfo bi{ m.ubo, 0, sizeof(MaterialData) };
-        VkDescriptorImageInfo ii{ m.albedo->sampler, m.albedo->view,
-                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
-        VkWriteDescriptorSet writes[2]{};
+        VkDescriptorImageInfo images[5] = {
+            { m.albedo->sampler,            m.albedo->view,            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+            { m.normal->sampler,            m.normal->view,            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+            { m.metallicRoughness->sampler, m.metallicRoughness->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+            { m.emissive->sampler,          m.emissive->view,          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+            { m.ao->sampler,                m.ao->view,                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL },
+        };
+
+        VkWriteDescriptorSet writes[6]{};
         writes[0] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
         writes[0].dstSet = m.set;
         writes[0].dstBinding = 0;
         writes[0].descriptorCount = 1;
         writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
         writes[0].pBufferInfo = &bi;
-        writes[1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
-        writes[1].dstSet = m.set;
-        writes[1].dstBinding = 1;
-        writes[1].descriptorCount = 1;
-        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-        writes[1].pImageInfo = &ii;
-        vkUpdateDescriptorSets(c.device, 2, writes, 0, nullptr);
+        for (int t = 0; t < 5; t++) {
+            writes[t + 1] = { VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET };
+            writes[t + 1].dstSet = m.set;
+            writes[t + 1].dstBinding = (uint32_t)(t + 1);
+            writes[t + 1].descriptorCount = 1;
+            writes[t + 1].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            writes[t + 1].pImageInfo = &images[t];
+        }
+        vkUpdateDescriptorSets(c.device, 6, writes, 0, nullptr);
     }
 }
 
@@ -266,4 +334,6 @@ void Model::destroy(Context& c) {
     }
     for (auto& [path, tex] : textureCache) tex->destroy(c);
     defaultWhite.destroy(c);
+    defaultNormal.destroy(c);
+    defaultBlack.destroy(c);
 }
