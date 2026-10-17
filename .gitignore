@@ -2,5 +2,3 @@
 *.user
 x64/
 vs/
-*.spv
-Vendors/

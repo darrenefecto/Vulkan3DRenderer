@@ -1,0 +1,101 @@
+#version 450
+// Cluster light assignment (Forward+).
+// One workgroup per cluster; 64 threads cooperatively test all lights
+// against the cluster's view-space AABB and build a compacted index list.
+
+struct ClusterLight {
+    vec4 posRange;   // xyz = world pos, w = range
+    vec4 color;      // rgb = color*intensity, w = shadow index (-1 = none)
+    vec4 dirInner;   // xyz = direction (spots), w = innerCos
+    vec4 outerType;  // x = outerCos, y = type (0 = point, 1 = spot)
+};
+
+layout(std430, set = 0, binding = 0) readonly buffer LightBuffer {
+    ClusterLight lights[];
+};
+layout(std430, set = 0, binding = 1) writeonly buffer ClusterGrid {
+    uvec2 grid[];    // per cluster: x = offset into lightIndices, y = count
+};
+layout(std430, set = 0, binding = 2) writeonly buffer LightIndices {
+    uint lightIndices[];
+};
+
+layout(push_constant) uniform Params {
+    mat4 view;
+    vec4 screen;   // w, h, tileW, tileH (pixels)
+    vec4 zparams;  // near, far, tanHalfFovX, tanHalfFovY
+    ivec4 dims;    // x = gridX, y = gridY, z = gridZ, w = lightCount
+} pc;
+
+#define MAX_LIGHTS_PER_CLUSTER 64
+layout(local_size_x = 64) in;
+
+shared uint s_count;
+shared uint s_list[MAX_LIGHTS_PER_CLUSTER];
+
+// view-space point at a pixel corner and view depth d (d > 0)
+vec3 viewPoint(vec2 pixel, float d) {
+    vec2 ndc = vec2(pixel.x / pc.screen.x * 2.0 - 1.0,
+                    1.0 - pixel.y / pc.screen.y * 2.0);
+    return vec3(ndc.x * d * pc.zparams.z, ndc.y * d * pc.zparams.w, -d);
+}
+
+void main() {
+    uvec3 cid = gl_WorkGroupID;
+    uint clusterIdx = cid.x + cid.y * uint(pc.dims.x) + cid.z * uint(pc.dims.x) * uint(pc.dims.y);
+    uint tid = gl_LocalInvocationIndex;
+
+    if (tid == 0) s_count = 0;
+    barrier();
+
+    // --- cluster AABB in view space (exponential depth slices) ---
+    float nearClip = pc.zparams.x;
+    float farClip = pc.zparams.y;
+    float zNear = nearClip * pow(farClip / nearClip, float(cid.z) / float(pc.dims.z));
+    float zFar = nearClip * pow(farClip / nearClip, float(cid.z + 1) / float(pc.dims.z));
+
+    vec2 pMin = vec2(cid.xy) * pc.screen.zw;
+    vec2 pMax = vec2(cid.xy + 1u) * pc.screen.zw;
+
+    vec3 c00 = viewPoint(pMin, zNear);
+    vec3 c10 = viewPoint(vec2(pMax.x, pMin.y), zNear);
+    vec3 c01 = viewPoint(vec2(pMin.x, pMax.y), zNear);
+    vec3 c11 = viewPoint(pMax, zNear);
+    vec3 f00 = viewPoint(pMin, zFar);
+    vec3 f10 = viewPoint(vec2(pMax.x, pMin.y), zFar);
+    vec3 f01 = viewPoint(vec2(pMin.x, pMax.y), zFar);
+    vec3 f11 = viewPoint(pMax, zFar);
+
+    vec3 aabbMin = min(min(min(c00, c10), min(c01, c11)),
+                       min(min(f00, f10), min(f01, f11)));
+    vec3 aabbMax = max(max(max(c00, c10), max(c01, c11)),
+                       max(max(f00, f10), max(f01, f11)));
+
+    // --- test lights (strided over threads) ---
+    int lightCount = pc.dims.w;
+    for (uint i = tid; i < uint(lightCount); i += 64) {
+        ClusterLight L = lights[i];
+        vec3 centerV = (pc.view * vec4(L.posRange.xyz, 1.0)).xyz;
+        float radius = L.posRange.w;
+        if (L.outerType.y > 0.5) {
+            // spot: conservative bounding sphere of the cone
+            vec3 dirV = normalize((pc.view * vec4(L.dirInner.xyz, 0.0)).xyz);
+            centerV += dirV * (radius * 0.5);
+            radius *= 0.75;
+        }
+        vec3 closest = clamp(centerV, aabbMin, aabbMax);
+        vec3 d = centerV - closest;
+        if (dot(d, d) <= radius * radius) {
+            uint slot = atomicAdd(s_count, 1);
+            if (slot < MAX_LIGHTS_PER_CLUSTER) s_list[slot] = i;
+        }
+    }
+    barrier();
+
+    if (tid == 0) {
+        uint count = min(s_count, uint(MAX_LIGHTS_PER_CLUSTER));
+        grid[clusterIdx] = uvec2(clusterIdx * uint(MAX_LIGHTS_PER_CLUSTER), count);
+        for (uint i = 0; i < count; i++)
+            lightIndices[clusterIdx * uint(MAX_LIGHTS_PER_CLUSTER) + i] = s_list[i];
+    }
+}

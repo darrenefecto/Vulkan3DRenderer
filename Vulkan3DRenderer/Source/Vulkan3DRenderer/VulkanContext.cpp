@@ -104,7 +104,7 @@ bool Context::isDeviceSuitable(VkPhysicalDevice d) const {
     VkPhysicalDeviceFeatures2 f2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
     f2.pNext = &f13;
     vkGetPhysicalDeviceFeatures2(d, &f2);
-    if (!f13.dynamicRendering || !f13.synchronization2 || !f2.features.samplerAnisotropy) return false;
+    if (!f13.dynamicRendering || !f13.synchronization2 || !f13.shaderDemoteToHelperInvocation || !f2.features.samplerAnisotropy || !f2.features.imageCubeArray) return false;
 
     auto sc = querySwapchain(d, surface);
     return !sc.formats.empty() && !sc.modes.empty();
@@ -146,9 +146,12 @@ void Context::createDevice() {
     VkPhysicalDeviceVulkan13Features f13{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES };
     f13.dynamicRendering = VK_TRUE;
     f13.synchronization2 = VK_TRUE;
+    f13.shaderDemoteToHelperInvocation = VK_TRUE;
+
     VkPhysicalDeviceFeatures2 f2{ VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2 };
     f2.pNext = &f13;
     f2.features.samplerAnisotropy = VK_TRUE;
+    f2.features.imageCubeArray = VK_TRUE;
 
     const char* devExts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
     VkDeviceCreateInfo ci{ VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };

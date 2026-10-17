@@ -2,10 +2,17 @@
 #include <assimp/Importer.hpp>
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
+#if __has_include(<assimp/GltfMaterial.h>)
+#include <assimp/GltfMaterial.h>
+#elif __has_include(<assimp/pbrmaterial.h>)
+#include <assimp/pbrmaterial.h>
+#endif
 #include <iostream>
 #include <algorithm>
 #include <cstring>
 #include <cmath>
+#include <initializer_list>
+#include <cstdlib>
 
 static glm::mat4 toGlm(const aiMatrix4x4& m) {
     return glm::mat4( // aiMatrix is row-major, glm column-major
@@ -67,6 +74,9 @@ void Model::processMesh(const void* meshPtr, const glm::mat4& transform) {
     const ::aiMesh* meshData = static_cast<const ::aiMesh*>(meshPtr);
 
     Mesh mesh;
+    mesh.renderMode = defaultRenderMode;
+    mesh.customVertexShaderSpv = defaultCustomVertexShaderSpv;
+    mesh.customFragmentShaderSpv = defaultCustomFragmentShaderSpv;
     mesh.transform = transform;
     mesh.materialIndex = meshData->mMaterialIndex;
     mesh.vertices.reserve(meshData->mNumVertices);
@@ -151,11 +161,18 @@ Texture2D* Model::loadEmbeddedTexture(const void* scenePtr, int index, bool srgb
     if (it != textureCache.end()) return it->second.get();
 
     auto tex = std::make_unique<Texture2D>();
-    if (aiTex->mHeight == 0) { // compressed (png/jpg) blob
-        tex->createFromMemory(*ctx, aiTex->pcData, (int)aiTex->mWidth, srgb);
+    try {
+        if (aiTex->mHeight == 0) { // compressed (typically PNG/JPEG) blob
+            tex->createFromMemory(*ctx, aiTex->pcData, (int)aiTex->mWidth, srgb);
+        }
+        else {
+            std::cerr << "Uncompressed embedded texture not supported, using default\n";
+            return nullptr;
+        }
     }
-    else {
-        std::cerr << "Uncompressed embedded texture not supported, using default\n";
+    catch (const std::exception& e) {
+        std::cerr << "Failed to load embedded texture *" << index << ": "
+                  << e.what() << " (using default)\n";
         return nullptr;
     }
     Texture2D* raw = tex.get();
@@ -164,87 +181,163 @@ Texture2D* Model::loadEmbeddedTexture(const void* scenePtr, int index, bool srgb
 }
 
 void Model::loadMaterial(int index, const void* matPtr, const void* scenePtr) {
-    auto* aiMat = (const aiMaterial*)matPtr;
+    auto* aiMat = static_cast<const aiMaterial*>(matPtr);
     Material& m = materials[index];
     m.name = aiMat->GetName().C_Str();
 
-    auto resolveTexture = [&](aiTextureType type, unsigned texIndex, bool srgb) -> Texture2D* {
-        aiString texPath;
-        if (aiMat->GetTexture(type, texIndex, &texPath) != AI_SUCCESS) return nullptr;
-        const char* p = texPath.C_Str();
-        if (p[0] == '*') return loadEmbeddedTexture(scenePtr, atoi(p + 1), srgb);
+    // Resolve both external files and compressed textures embedded in a .glb.
+    // Data maps must stay linear; only color maps are loaded as sRGB.
+    auto resolveTexturePath = [&](const aiString& texturePath, bool srgb) -> Texture2D* {
+        const char* p = texturePath.C_Str();
+        if (p[0] == '*')
+            return loadEmbeddedTexture(scenePtr, std::atoi(p + 1), srgb);
+
         std::string full = directory + "/" + std::string(p);
         std::replace(full.begin(), full.end(), '\\', '/');
         return loadTexture(full, srgb);
     };
 
-    // --- factors ---
+    auto resolveTexture = [&](aiTextureType type, unsigned texIndex, bool srgb) -> Texture2D* {
+        aiString texturePath;
+        if (aiMat->GetTexture(type, texIndex, &texturePath) != AI_SUCCESS)
+            return nullptr;
+        return resolveTexturePath(texturePath, srgb);
+    };
+
+    auto resolveFirstTexture = [&](std::initializer_list<aiTextureType> types,
+                                   bool srgb) -> Texture2D* {
+        for (aiTextureType type : types) {
+            if (Texture2D* texture = resolveTexture(type, 0, srgb))
+                return texture;
+        }
+        return nullptr;
+    };
+
+    // --- PBR factors ---
+    // Assimp's glTF importer writes the core glTF values to these generic keys.
     aiColor4D color;
     if (aiGetMaterialColor(aiMat, AI_MATKEY_COLOR_DIFFUSE, &color) == AI_SUCCESS)
         m.data.baseColor = { color.r, color.g, color.b, color.a };
-    if (aiGetMaterialColor(aiMat, AI_MATKEY_BASE_COLOR, &color) == AI_SUCCESS) // glTF wins
-        m.data.baseColor = { color.r, color.g, color.b, color.a };
+    if (aiGetMaterialColor(aiMat, AI_MATKEY_BASE_COLOR, &color) == AI_SUCCESS)
+        m.data.baseColor = { color.r, color.g, color.b, color.a }; // glTF baseColorFactor wins
 
-    float f;
+    float f = 0.0f;
     if (aiGetMaterialFloat(aiMat, AI_MATKEY_METALLIC_FACTOR, &f) == AI_SUCCESS)
-        m.data.params.x = f;
+        m.data.params.x = glm::clamp(f, 0.0f, 1.0f);
     if (aiGetMaterialFloat(aiMat, AI_MATKEY_ROUGHNESS_FACTOR, &f) == AI_SUCCESS)
-        m.data.params.y = f;
+        m.data.params.y = glm::clamp(f, 0.0f, 1.0f);
     else if (aiGetMaterialFloat(aiMat, AI_MATKEY_SHININESS, &f) == AI_SUCCESS && f > 0.0f)
         m.data.params.y = glm::clamp(sqrtf(2.0f / (f + 2.0f)), 0.05f, 1.0f);
 
     if (aiGetMaterialColor(aiMat, AI_MATKEY_COLOR_EMISSIVE, &color) == AI_SUCCESS)
         m.data.emissive = { color.r, color.g, color.b, 1.0f };
 
-    // --- textures ---
-    if (Texture2D* t = resolveTexture(aiTextureType_BASE_COLOR, 0, true)) {
-        m.albedo = t; m.data.flags.x = 1.0f;
-    }
-    else if (Texture2D* t2 = resolveTexture(aiTextureType_DIFFUSE, 0, true)) {
-        m.albedo = t2; m.data.flags.x = 1.0f;
-    }
-
-    if (Texture2D* t = resolveTexture(aiTextureType_NORMALS, 0, false)) {
-        m.normal = t; m.data.flags.y = 1.0f;
+    // --- Base color / albedo (sRGB) ---
+    // Recent Assimp exposes glTF's baseColorTexture as BASE_COLOR; older
+    // importers expose it through the legacy DIFFUSE slot as well.
+    if (Texture2D* t = resolveFirstTexture(
+            { aiTextureType_BASE_COLOR, aiTextureType_DIFFUSE }, true)) {
+        m.albedo = t;
+        m.data.flags.x = 1.0f;
     }
 
-    // packed glTF metallic-roughness (g = roughness, b = metallic)
+    // --- Tangent-space normal map (linear) ---
+    if (Texture2D* t = resolveFirstTexture(
+            { aiTextureType_NORMALS, aiTextureType_NORMAL_CAMERA }, false)) {
+        m.normal = t;
+        m.data.flags.y = 1.0f;
+    }
+
+    // --- glTF metallicRoughnessTexture (linear; G=roughness, B=metallic) ---
+    // Older and current Assimp releases expose this texture under the
+    // glTF-specific UNKNOWN key. Some releases also expose METALNESS and
+    // DIFFUSE_ROUGHNESS aliases, so try those if the key lookup is unavailable.
+    Texture2D* mrTexture = nullptr;
 #ifdef AI_MATKEY_GLTF_PBRMETALLICROUGHNESS_METALLICROUGHNESS_TEXTURE
     {
-        aiString texPath;
-        if (aiMat->GetTexture(AI_MATKEY_GLTF_PBRMETALLICROUGHNESS_METALLICROUGHNESS_TEXTURE,
-                              &texPath) == AI_SUCCESS) {
-            const char* p = texPath.C_Str();
-            Texture2D* t = nullptr;
-            if (p[0] == '*') t = loadEmbeddedTexture(scenePtr, atoi(p + 1), false);
-            else {
-                std::string full = directory + "/" + std::string(p);
-                std::replace(full.begin(), full.end(), '\\', '/');
-                t = loadTexture(full, false);
-            }
-            if (t) { m.metallicRoughness = t; m.data.flags.z = 1.0f; }
+        aiString texturePath;
+        if (aiMat->GetTexture(
+                AI_MATKEY_GLTF_PBRMETALLICROUGHNESS_METALLICROUGHNESS_TEXTURE,
+                &texturePath) == AI_SUCCESS) {
+            mrTexture = resolveTexturePath(texturePath, false);
         }
     }
 #endif
-
-    if (Texture2D* t = resolveTexture(aiTextureType_EMISSIVE, 0, true)) {
-        m.emissive = t; m.data.flags.w = 1.0f;
+    if (!mrTexture) {
+        mrTexture = resolveFirstTexture(
+            { aiTextureType_METALNESS, aiTextureType_DIFFUSE_ROUGHNESS }, false);
     }
-    // emissive factor (m.data.emissive) still glows without a map:
-    // the shader multiplies by the map only when flags.w is set
-
-    if (Texture2D* t = resolveTexture(aiTextureType_LIGHTMAP, 0, false)) { // glTF occlusion
-        m.ao = t; m.data.params.w = 1.0f;
+    // Keep the direct fallback even on Assimp versions without GltfMaterial.h.
+    if (!mrTexture)
+        mrTexture = resolveTexture(aiTextureType_UNKNOWN, 0, false);
+    if (mrTexture) {
+        m.metallicRoughness = mrTexture;
+        m.data.flags.z = 1.0f;
     }
 
+    // --- Emissive map (sRGB) ---
+    if (Texture2D* t = resolveFirstTexture(
+            { aiTextureType_EMISSION_COLOR, aiTextureType_EMISSIVE }, true)) {
+        m.emissive = t;
+        m.data.flags.w = 1.0f;
+    }
+
+    // --- Occlusion map (linear; glTF uses the red channel) ---
+    if (Texture2D* t = resolveFirstTexture(
+            { aiTextureType_AMBIENT_OCCLUSION, aiTextureType_LIGHTMAP }, false)) {
+        m.ao = t;
+        m.data.params.w = 1.0f;
+#ifdef AI_MATKEY_GLTF_TEXTURE_STRENGTH
+        // glTF occlusionTexture.strength defaults to 1.0.
+        float strength = 1.0f;
+        if (aiMat->Get(AI_MATKEY_GLTF_TEXTURE_STRENGTH(aiTextureType_LIGHTMAP, 0), strength)
+                == AI_SUCCESS) {
+            m.data.params.z = glm::clamp(strength, 0.0f, 1.0f);
+        }
+#endif
+    }
+
+    // Neutral fallback textures keep the factors above authoritative whenever
+    // a material does not supply the corresponding map.
     if (!m.albedo) m.albedo = &defaultWhite;
     if (!m.normal) m.normal = &defaultNormal;
-    if (!m.metallicRoughness) m.metallicRoughness = &defaultWhite; // g=1,b=1 -> overridden by factors
+    if (!m.metallicRoughness) m.metallicRoughness = &defaultWhite;
     if (!m.emissive) m.emissive = &defaultBlack;
     if (!m.ao) m.ao = &defaultWhite;
 
-    // If no MR map: the map's neutral value (g=1,b=1) must not fight the factors,
-    // so the shader multiplies map * factor; defaultWhite keeps factors untouched.
+    // --- Transparency classification (opaque/deferred vs blended/Forward+) ---
+    {
+        float opacity = 1.0f;
+        if (aiGetMaterialFloat(aiMat, AI_MATKEY_OPACITY, &f) == AI_SUCCESS)
+            opacity = f;
+        opacity *= m.data.baseColor.a;
+
+        bool blendMode = false;
+        float blendFunc = 0.0f;
+        if (aiGetMaterialFloat(aiMat, AI_MATKEY_BLEND_FUNC, &blendFunc) == AI_SUCCESS)
+            blendMode = (blendFunc != 0.0f); // 0 = aiBlendMode_Default
+
+        bool gltfBlend = false;
+#ifdef AI_MATKEY_GLTF_ALPHAMODE
+        aiString alphaMode;
+        if (aiGetMaterialString(aiMat, AI_MATKEY_GLTF_ALPHAMODE, &alphaMode) == AI_SUCCESS)
+            gltfBlend = (std::strcmp(alphaMode.C_Str(), "BLEND") == 0);
+#endif
+        m.transparent = opacity < 0.999f || blendMode || gltfBlend;
+    }
+
+    // These per-material diagnostics are deliberately explicit: if a channel
+    // is reported as absent here, it was not imported or resolved before the
+    // Vulkan descriptor/shader stage.
+    std::cout << "[Material] " << (m.name.empty() ? "<unnamed>" : m.name)
+        << " | baseColor=" << (m.data.flags.x > 0.5f ? "texture" : "factor")
+        << " | normal=" << (m.data.flags.y > 0.5f ? "texture" : "none")
+        << " | metallicRoughness=" << (m.data.flags.z > 0.5f ? "texture" : "factors")
+        << " | AO=" << (m.data.params.w > 0.5f ? "texture" : "none")
+        << " | emissive=" << (m.data.flags.w > 0.5f ? "texture" : "factor/none")
+        << " | metallic=" << m.data.params.x
+        << " | roughness=" << m.data.params.y
+        << "\n";
 }
 
 void Model::createBuffers(Mesh& mesh) {

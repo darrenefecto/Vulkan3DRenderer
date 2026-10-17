@@ -7,7 +7,11 @@
 #include <string>
 #include <memory>
 #include <array>
+#include <cstddef>
 #include <unordered_map>
+
+// Selectable opaque shading mode. Transparent materials use internal Forward+.
+enum class RenderMode { Deferred = 0, Forward, Custom };
 
 struct Vertex {
     glm::vec3 pos;
@@ -50,6 +54,10 @@ struct Material {
     VkBuffer ubo = VK_NULL_HANDLE;
     VkDeviceMemory uboMem = VK_NULL_HANDLE;
     VkDescriptorSet set = VK_NULL_HANDLE;
+    // Set during load from the opacity factor / glTF alphaMode / blend mode.
+    // Transparent surfaces always go through the clustered forward transparent
+    // pass; opaque surfaces follow their mesh's renderMode.
+    bool transparent = false;
 };
 
 struct Mesh {
@@ -57,12 +65,23 @@ struct Mesh {
     std::vector<uint32_t> indices;
     glm::mat4 transform{ 1.0f };
     uint32_t materialIndex = 0;
+
+    // Opaque shading mode. Deferred is the hybrid renderer default.
+    RenderMode renderMode = RenderMode::Deferred;
+    std::string customVertexShaderSpv;
+    std::string customFragmentShaderSpv;
+
     VkBuffer vb = VK_NULL_HANDLE, ib = VK_NULL_HANDLE;
     VkDeviceMemory vbm = VK_NULL_HANDLE, ibm = VK_NULL_HANDLE;
 };
 
 class Model {
 public:
+    explicit Model(RenderMode mode = RenderMode::Deferred,
+        const std::string& vertexSpv = {}, const std::string& fragmentSpv = {})
+        : defaultRenderMode(mode), defaultCustomVertexShaderSpv(vertexSpv),
+          defaultCustomFragmentShaderSpv(fragmentSpv) {}
+
     std::vector<Mesh> meshes;
     std::vector<Material> materials;
 
@@ -70,7 +89,36 @@ public:
     void createDescriptors(Context& ctx, VkDescriptorPool pool, VkDescriptorSetLayout layout);
     void destroy(Context& ctx);
 
+    // Configure the rendering mode for a whole model or one mesh.
+    void setRenderMode(RenderMode mode) {
+        defaultRenderMode = mode;
+        for (auto& mesh : meshes) mesh.renderMode = mode;
+    }
+    void setMeshRenderMode(std::size_t meshIndex, RenderMode mode) {
+        meshes.at(meshIndex).renderMode = mode;
+    }
+    void setCustomShader(const std::string& vertexSpv, const std::string& fragmentSpv) {
+        defaultRenderMode = RenderMode::Custom;
+        defaultCustomVertexShaderSpv = vertexSpv;
+        defaultCustomFragmentShaderSpv = fragmentSpv;
+        for (auto& mesh : meshes) {
+            mesh.renderMode = RenderMode::Custom;
+            mesh.customVertexShaderSpv = vertexSpv;
+            mesh.customFragmentShaderSpv = fragmentSpv;
+        }
+    }
+    void setMeshCustomShader(std::size_t meshIndex, const std::string& vertexSpv,
+        const std::string& fragmentSpv) {
+        auto& mesh = meshes.at(meshIndex);
+        mesh.renderMode = RenderMode::Custom;
+        mesh.customVertexShaderSpv = vertexSpv;
+        mesh.customFragmentShaderSpv = fragmentSpv;
+    }
+
 private:
+    RenderMode defaultRenderMode = RenderMode::Deferred;
+    std::string defaultCustomVertexShaderSpv;
+    std::string defaultCustomFragmentShaderSpv;
     Context* ctx = nullptr;
     std::string directory;
     std::unordered_map<std::string, std::unique_ptr<Texture2D>> textureCache;

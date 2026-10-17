@@ -4,6 +4,7 @@
 #include <cstring>
 #include <iostream>
 #include <fstream>
+#include <filesystem>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
@@ -137,24 +138,47 @@ static bool fileExists(const std::string& p) {
     return f.good();
 }
 
+static std::string resolveAssetPath(const std::string& path) {
+    namespace fs = std::filesystem;
+    const fs::path requested(path);
+    std::error_code ec;
+    if (requested.is_absolute() && fs::exists(requested, ec)) return requested.string();
+    if (fs::exists(requested, ec)) return fs::absolute(requested, ec).string();
+
+    fs::path base = fs::current_path(ec);
+    for (int depth = 0; depth < 8 && !base.empty(); ++depth) {
+        const fs::path candidate = base / requested;
+        ec.clear();
+        if (fs::exists(candidate, ec)) return candidate.string();
+        const fs::path parent = base.parent_path();
+        if (parent == base) break;
+        base = parent;
+    }
+    return path;
+}
+
 void Cubemap::createFromFiles(Context& ctx, const std::array<std::string, 6>& paths) {
     std::array<stbi_uc*, 6> pixels{};
     int w = 0, h = 0;
     for (int i = 0; i < 6; i++) {
-        std::string p = paths[i];
-        if (!fileExists(p)) { // jpg <-> png fallback
+        std::string p = resolveAssetPath(paths[i]);
+        if (!fileExists(p)) {
             std::string alt = p.substr(0, p.find_last_of('.')) +
                 (p.ends_with(".png") ? ".jpg" : ".png");
+            alt = resolveAssetPath(alt);
             if (fileExists(alt)) p = alt;
         }
-        int fw, fh, ch;
+        int fw = 0, fh = 0, ch = 0;
         pixels[i] = stbi_load(p.c_str(), &fw, &fh, &ch, STBI_rgb_alpha);
         if (!pixels[i]) {
-            for (int j = 0; j < i; j++) stbi_image_free(pixels[j]);
+            for (stbi_uc* loaded : pixels) if (loaded) stbi_image_free(loaded);
             throw std::runtime_error("Failed to load cubemap face: " + p);
         }
         if (i == 0) { w = fw; h = fh; }
-        else if (fw != w || fh != h) throw std::runtime_error("Cubemap faces must be the same size");
+        else if (fw != w || fh != h) {
+            for (stbi_uc* loaded : pixels) if (loaded) stbi_image_free(loaded);
+            throw std::runtime_error("Cubemap faces must be the same size: " + p);
+        }
     }
 
     mipLevels = (uint32_t)std::floor(std::log2((double)std::max(w, h))) + 1;

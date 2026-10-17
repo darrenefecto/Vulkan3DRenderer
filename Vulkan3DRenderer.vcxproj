@@ -169,15 +169,18 @@
   <ItemGroup>
     <ClCompile Include="Vulkan3DRenderer\Source\Vulkan3DRenderer\Mesh.cpp" />
     <ClCompile Include="Vulkan3DRenderer\Source\Vulkan3DRenderer\Renderer.cpp" />
+    <ClCompile Include="Vulkan3DRenderer\Source\Vulkan3DRenderer\RenderGraph.cpp" />
     <ClCompile Include="Vulkan3DRenderer\Source\Vulkan3DRenderer\Texture.cpp" />
     <ClCompile Include="Vulkan3DRenderer\Source\Vulkan3DRenderer\main.cpp" />
     <ClCompile Include="Vulkan3DRenderer\Source\Vulkan3DRenderer\VulkanContext.cpp" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Vulkan3DRenderer\Include\Vulkan3DRenderer\Camera.h" />
+    <ClInclude Include="Vulkan3DRenderer\Include\Vulkan3DRenderer\ClusteredLighting.h" />
     <ClInclude Include="Vulkan3DRenderer\Include\Vulkan3DRenderer\Light.h" />
     <ClInclude Include="Vulkan3DRenderer\Include\Vulkan3DRenderer\Mesh.h" />
     <ClInclude Include="Vulkan3DRenderer\Include\Vulkan3DRenderer\Renderer.h" />
+    <ClInclude Include="Vulkan3DRenderer\Include\Vulkan3DRenderer\RenderGraph.h" />
     <ClInclude Include="Vulkan3DRenderer\Include\Vulkan3DRenderer\Texture.h" />
     <ClInclude Include="Vulkan3DRenderer\Include\Vulkan3DRenderer\VulkanContext.h" />
   </ItemGroup>
