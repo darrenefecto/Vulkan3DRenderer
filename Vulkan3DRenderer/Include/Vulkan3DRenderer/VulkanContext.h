@@ -19,6 +19,8 @@ class Context {
 public:
     GLFWwindow* window = nullptr;
     VkInstance           instance = VK_NULL_HANDLE;
+    VkDebugUtilsMessengerEXT debugMessenger = VK_NULL_HANDLE;
+    bool validationActive = false;
     VkSurfaceKHR         surface = VK_NULL_HANDLE;
     VkPhysicalDevice     physicalDevice = VK_NULL_HANDLE;
     VkPhysicalDeviceProperties deviceProps{};

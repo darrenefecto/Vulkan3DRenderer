@@ -16,6 +16,8 @@ public:
     void createFromFile(Context& ctx, const std::string& path, bool srgb = true);
     void createFromMemory(Context& ctx, const void* data, int byteLength, bool srgb = true); // png/jpg in memory
     void createSolid(Context& ctx, uint8_t r, uint8_t g, uint8_t b, uint8_t a, bool srgb = true);
+    // Raw linear RG32F LUT: uint32 width, uint32 height, then packed RG float32 pixels.
+    void createFromRG32FFile(Context& ctx, const std::string& path);
     void destroy(Context& ctx);
 
 private:
@@ -33,6 +35,8 @@ public:
 
     void createFromFiles(Context& ctx, const std::array<std::string, 6>& paths); // px nx py ny pz nz
     void createSolid(Context& ctx, uint8_t r, uint8_t g, uint8_t b, uint8_t a);  // fallback
+    void createFromMipFiles(Context& ctx, const std::string& directory, uint32_t levels); // mipN/{px,...}.png
+    void createFromHDRRawMipFiles(Context& ctx, const std::string& directory, uint32_t levels); // raw RGBA32F mipN/{px,...}.rgba32f
     void destroy(Context& ctx);
 
 private:

@@ -22,6 +22,10 @@ layout(std430, set = 2, binding = 2) readonly buffer LightIndices {
     uint lightIndices[];
 };
 
+// Shared final GTAO from opaque deferred/forward depth and normal buffers.
+// Transparent geometry does not write to those buffers.
+layout(set = 3, binding = 0) uniform sampler2D gtaoTexture;
+
 layout(std140, set = 1, binding = 0) uniform MaterialUBO {
     vec4 baseColor;
     vec4 emissive;
@@ -49,6 +53,7 @@ layout(location = 2) in vec2 uv;
 layout(location = 3) in vec4 tangent;
 
 layout(location = 0) out vec4 outColor;
+layout(location = 1) out vec4 outReactive;
 
 vec3 evalClusterPoint(ClusterLight L, vec3 N, vec3 V, vec3 albedo, float metallic, float roughness) {
     vec3 toLight = L.posRange.xyz - worldPos;
@@ -97,10 +102,12 @@ void main() {
         roughness *= mr.g;
         metallic *= mr.b;
     }
+    metallic = clamp(metallic, 0.0, 1.0);
+    roughness = clamp(roughness, 0.045, 1.0);
     vec3 emissive = mat.emissive.rgb;
     if (mat.flags.w > 0.5) emissive *= texture(emissiveMap, uv).rgb;
     float ao = 1.0;
-    if (mat.params.w > 0.5) ao = mix(1.0, texture(aoMap, uv).r, mat.params.z);
+    if (mat.params.w > 0.5) ao = mix(1.0, clamp(texture(aoMap, uv).r, 0.0, 1.0), clamp(mat.params.z, 0.0, 1.0));
 
     vec3 V = normalize(g.camPos.xyz - worldPos);
     float viewDepth = -(g.view * vec4(worldPos, 1.0)).z;
@@ -156,8 +163,16 @@ void main() {
 
     for (int i = 0; i < g.counts.z; i++)
         color += evalArea(i, N, V, worldPos, albedo, metallic, roughness);
-    color += evalIBL(N, V, albedo, metallic, roughness, ao);
+    // Apply screen-space occlusion to indirect light only. The GTAO texture
+    // represents the opaque scene behind this transparent layer, so this is
+    // an approximation rather than independent transparent-layer GTAO.
+    ivec2 aoSize = textureSize(gtaoTexture, 0);
+    ivec2 aoPixel = clamp(ivec2(gl_FragCoord.xy), ivec2(0), aoSize - ivec2(1));
+    float screenAO = clamp(texelFetch(gtaoTexture, aoPixel, 0).r, 0.0, 1.0);
+    color += evalIBL(N, V, albedo, metallic, roughness, ao * screenAO);
     color += emissive;
 
     outColor = vec4(color, albedoA.a);
+    // With src-alpha blending this accumulates 1 - product(1 - alpha).
+    outReactive = vec4(1.0, 1.0, 1.0, clamp(albedoA.a, 0.0, 1.0));
 }

@@ -48,6 +48,9 @@ layout(std140, set = 0, binding = 0) uniform Global {
 } g;
 
 layout(set = 0, binding = 1) uniform samplerCube envMap;
+layout(set = 0, binding = 6) uniform samplerCube diffuseIrradianceMap;
+layout(set = 0, binding = 7) uniform samplerCube specularPrefilterMap;
+layout(set = 0, binding = 8) uniform sampler2D brdfLutMap;
 layout(set = 0, binding = 2) uniform sampler2DArrayShadow csmShadowMap;
 layout(set = 0, binding = 3) uniform sampler2DArrayShadow spotShadowMap;
 layout(set = 0, binding = 4) uniform samplerCubeArrayShadow pointShadowMap;
@@ -84,6 +87,11 @@ vec3 fresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
 
 vec3 cookTorrance(vec3 N, vec3 V, vec3 L, vec3 radiance,
                   vec3 albedo, float metallic, float roughness) {
+    // Imported/custom roughness can be zero or out of range. Avoid a GGX
+    // singularity and use the same lower bound as the IBL shader.
+    roughness = clamp(roughness, 0.045, 1.0);
+    metallic = clamp(metallic, 0.0, 1.0);
+    if (dot(N, L) <= 0.0 || dot(N, V) <= 0.0) return vec3(0.0);
     vec3 H = normalize(V + L);
     vec3 F0 = mix(vec3(0.04), albedo, metallic);
     vec3 F = fresnelSchlick(max(dot(H, V), 0.0), F0);
@@ -212,20 +220,10 @@ vec3 evalArea(int i, vec3 N, vec3 V, vec3 worldPos,
     return sum;
 }
 
-// ---------------------------------------------------------------------------
-// Image-based lighting from the skybox cubemap (no prefiltering: LOD-based)
-// ---------------------------------------------------------------------------
+#include "ibl_runtime.glsl"
+
 vec3 evalIBL(vec3 N, vec3 V, vec3 albedo, float metallic, float roughness, float ao) {
-    float maxLod = g.skyParams.x;
-    vec3 F0 = mix(vec3(0.04), albedo, metallic);
-    vec3 F = fresnelSchlickRoughness(max(dot(N, V), 0.0), F0, roughness);
-    vec3 kd = (vec3(1.0) - F) * (1.0 - metallic);
-    vec3 irradiance = textureLod(envMap, N, maxLod).rgb;
-    vec3 diffuse = irradiance * albedo;
-    vec3 R = reflect(-V, N);
-    vec3 prefiltered = textureLod(envMap, R, roughness * maxLod).rgb;
-    vec3 specular = prefiltered * F;
-    return (kd * diffuse + specular) * ao * g.ambient.w
-         + g.ambient.rgb * albedo * ao;
+    return iblLighting(N, V, albedo, metallic, roughness, ao,
+                       g.ambient.w, g.ambient.rgb, g.skyParams.x);
 }
 #endif // PBR_COMMON_GLSL

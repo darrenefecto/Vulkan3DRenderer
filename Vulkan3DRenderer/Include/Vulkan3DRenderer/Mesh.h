@@ -71,6 +71,14 @@ struct Mesh {
     std::string customVertexShaderSpv;
     std::string customFragmentShaderSpv;
 
+    // Optional PREVIOUS-frame deformed vertices (same Vertex layout and index order
+    // as vb). Supplied by the animation system; this mesh does not own the buffer.
+    // When null, motion uses the same local positions as the current frame.
+    VkBuffer previousDeformedVertexBuffer = VK_NULL_HANDLE;
+    // Set true for CPU/GPU-deformed meshes. If previous positions are missing,
+    // TAA invalidates history instead of incorrectly reprojecting skinning motion.
+    bool vertexDeformed = false;
+
     VkBuffer vb = VK_NULL_HANDLE, ib = VK_NULL_HANDLE;
     VkDeviceMemory vbm = VK_NULL_HANDLE, ibm = VK_NULL_HANDLE;
 };

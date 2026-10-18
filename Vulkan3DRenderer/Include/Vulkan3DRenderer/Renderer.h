@@ -26,7 +26,14 @@ public:
     LightSystem lights;
 
     // --- HDR post-processing (composite pass) ---
+    bool taaEnabled = true; // TAA camera reprojection; moving meshes need per-object velocities
+    float taaHistoryWeight = 0.9f;
+    // Conservative fallback: history cap while transparent meshes are present.
+    // A future per-pixel reactive mask can replace this scene-wide protection.
+    float taaTransparentHistoryCap = 0.45f;
     float exposure = 1.0f;     // linear exposure multiplier before tonemapping
+    float gtaoRadius = 0.75f;  // World-space GTAO radius
+    float gtaoStrength = 1.25f; // GTAO darkening strength
     int   tonemapOperator = 2; // 0 = none (clamp), 1 = Reinhard, 2 = ACES filmic
 
     void init(Context& ctx, const std::array<std::string, 6>& skyboxFaces);
@@ -84,7 +91,12 @@ private:
     };
 
     VkDescriptorSetLayout globalLayout = VK_NULL_HANDLE;
-    VkDescriptorSetLayout gbufferSampleLayout = VK_NULL_HANDLE; // 4 gbuffer samplers
+    VkDescriptorSetLayout forwardAOLayout = VK_NULL_HANDLE; // set 2: final GTAO texture
+    VkDescriptorSetLayout gbufferSampleLayout = VK_NULL_HANDLE; // G-Buffer plus AO samplers
+    VkDescriptorSetLayout motionSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout taaSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout ssrSetLayout = VK_NULL_HANDLE;
+    VkDescriptorSetLayout ssrTemporalSetLayout = VK_NULL_HANDLE;
     VkDescriptorSetLayout compositeSetLayout = VK_NULL_HANDLE;  // 1 HDR sampler
     VkDescriptorSetLayout skyboxSetLayout = VK_NULL_HANDLE;     // skybox cubemap
     VkDescriptorSetLayout clusterSetLayout = VK_NULL_HANDLE;    // 3 SSBOs
@@ -93,8 +105,11 @@ private:
     VkPipelineLayout shadow2DPipeLayout = VK_NULL_HANDLE;
     VkPipelineLayout shadowCubePipeLayout = VK_NULL_HANDLE;
     VkPipelineLayout gbufferPipeLayout = VK_NULL_HANDLE;      // = mesh layout
-    VkPipelineLayout deferredPipeLayout = VK_NULL_HANDLE;     // global + gbuffer samplers
+    VkPipelineLayout deferredPipeLayout = VK_NULL_HANDLE;     // global + G-Buffer/AO samplers
     VkPipelineLayout forwardPlusPipeLayout = VK_NULL_HANDLE;  // global + material + clusters
+    VkPipelineLayout geometryMotionPipeLayout = VK_NULL_HANDLE;
+    VkPipelineLayout motionPipeLayout = VK_NULL_HANDLE;
+    VkPipelineLayout taaPipeLayout = VK_NULL_HANDLE;
     VkPipelineLayout compositePipeLayout = VK_NULL_HANDLE;
     VkPipelineLayout skyboxPipeLayout = VK_NULL_HANDLE;
     VkPipelineLayout clusterPipeLayout = VK_NULL_HANDLE;      // compute
@@ -103,9 +118,26 @@ private:
     VkPipeline shadow2DPipeline = VK_NULL_HANDLE;
     VkPipeline shadowCubePipeline = VK_NULL_HANDLE;
     VkPipeline gbufferPipeline = VK_NULL_HANDLE;       // MRT geometry pass
+    VkPipeline forwardAOPrepassPipeline = VK_NULL_HANDLE; // forward/custom AO-only MRT
+    VkPipeline gtaoPipeline = VK_NULL_HANDLE;          // Screen-space ambient occlusion
+    VkPipeline gtaoBlurPipeline = VK_NULL_HANDLE;     // Edge-aware AO denoising
     VkPipeline deferredPipeline = VK_NULL_HANDLE;      // fullscreen lighting
     VkPipeline forwardPlusBlendPipeline = VK_NULL_HANDLE; // transparent materials
     std::unordered_map<std::string, VkPipeline> customForwardPipelines;
+    VkPipeline geometryMotionPipeline = VK_NULL_HANDLE;
+    VkPipeline transparentMotionPipeline = VK_NULL_HANDLE;
+    VkPipeline motionPipeline = VK_NULL_HANDLE;
+    VkPipeline taaPipeline = VK_NULL_HANDLE;
+    VkPipeline ssrTracePipeline = VK_NULL_HANDLE;
+    VkPipeline ssgiTracePipeline = VK_NULL_HANDLE;
+    VkPipeline ssgiCombinePipeline = VK_NULL_HANDLE;
+    VkPipeline ssgiTemporalPipeline = VK_NULL_HANDLE;
+    VkPipeline ssrCombinePipeline = VK_NULL_HANDLE;
+    VkPipeline ssrTemporalPipeline = VK_NULL_HANDLE;
+    VkPipelineLayout ssrTraceLayout = VK_NULL_HANDLE;
+    VkPipelineLayout ssrCombineLayout = VK_NULL_HANDLE;
+    VkPipelineLayout ssgiDenoiseLayout = VK_NULL_HANDLE;
+    VkPipelineLayout ssrTemporalLayout = VK_NULL_HANDLE;
     VkPipeline compositePipeline = VK_NULL_HANDLE;     // HDR -> swapchain
     VkPipeline skyboxPipeline = VK_NULL_HANDLE;         // environment background
     VkPipeline clusterPipeline = VK_NULL_HANDLE;       // compute
@@ -113,6 +145,9 @@ private:
     // Environment cubemap: sampled as IBL by every shading shader and as the
     // skybox background by the deferred lighting pass (no dedicated pipeline).
     Cubemap skybox;
+    Cubemap irradiance; // baked cosine-weighted irradiance / PI
+    Cubemap specularPrefilter; // GGX convolution stored in mip chain
+    Texture2D brdfLut; // linear BRDF split-sum lookup
 
     // shadow resources (shared by all frames; same-queue barriers synchronize them)
     ShadowMap2D csmShadow;     // NUM_CASCADES layers
@@ -127,10 +162,52 @@ private:
     RTImage gNormal;      // R16G16B16A16_SFLOAT  rgb = world N, a = roughness
     RTImage gEmissive;    // R16G16B16A16_SFLOAT  rgb = emissive, a = AO
     RTImage gDepth;       // D32_SFLOAT (sampled + attachment)
+    RTImage gtaoRaw;      // R16_SFLOAT raw screen-space AO
+    RTImage gtaoBlur;     // R16_SFLOAT intermediate denoised AO
+    RTImage gtao;         // R16_SFLOAT final screen-space AO
+    RTImage transparentMotionVectors; // Separate transparent velocity; opaque motion is never overwritten
+    RTImage motionVectors; // RGBA16F: velocity.xy, previous depth, validity
+    RTImage taaReactiveMask; // R16F: per-pixel accumulated transparent coverage
+    RTImage taaHistory[2]; // HDR temporal ping-pong; no read/write feedback
+    RTImage iblDiffuse; // deferred-only diffuse IBL for controlled SSGI replacement
+    RTImage iblSpecular; // deferred-only indirect specular for SSR replacement
+    RTImage ssgiCombined; // diffuse SSGI composite after SSR, before TAA
+    RTImage ssgiIndirect; // current SSGI radiance/confidence
+    RTImage ssgiDenoised; // edge-aware spatial filtered indirect radiance
+    RTImage ssgiHistory[2]; // temporal indirect radiance/confidence
+    RTImage ssrReflection; // HDR radiance + hit confidence
+    RTImage ssrHistory[2]; // RGBA16F: radiance.rgb and reflection confidence
+    RTImage ssrCombined; // composited HDR, separate from trace source
     RTImage sceneColor;   // R16G16B16A16_SFLOAT HDR
 
+    VkDescriptorSet forwardAOSet = VK_NULL_HANDLE;
     VkDescriptorSet gbufferSampleSet = VK_NULL_HANDLE;
+    VkDescriptorSet gtaoHorizontalSet = VK_NULL_HANDLE;
+    VkDescriptorSet gtaoVerticalSet = VK_NULL_HANDLE;
+    VkDescriptorSet motionSet = VK_NULL_HANDLE;
+    VkDescriptorSet taaSets[2]{};
+    VkDescriptorSet ssrTraceSet = VK_NULL_HANDLE;
+    VkDescriptorSet ssrCombineSet = VK_NULL_HANDLE;
+    VkDescriptorSet ssgiCombineSet = VK_NULL_HANDLE;
+    VkDescriptorSet ssgiDenoiseSet = VK_NULL_HANDLE;
+    VkDescriptorSet ssgiTemporalSets[2]{};
+    VkPipeline ssgiDenoisePipeline = VK_NULL_HANDLE;
+    VkDescriptorSet ssrTemporalSets[2]{};
     VkDescriptorSet compositeSet = VK_NULL_HANDLE;
+    glm::mat4 previousViewProj{ 1.0f };
+    glm::mat4 previousUnjitteredViewProj{ 1.0f }; // camera-cut detection independent of TAA jitter
+    std::unordered_map<const Mesh*, glm::mat4> previousMeshTransforms;
+    bool ssrEnabled = true;
+    bool ssgiTraceEnabled = false; // opt-in until GPU validation and diffuse composition
+    bool ssgiHistoryValid = false;
+    uint32_t ssgiHistoryIndex = 0;
+    bool ssrHistoryValid = false;
+    uint32_t ssrHistoryIndex = 0;
+    bool taaHistoryValid = false;
+    bool taaWasEnabled = false;
+    uint32_t taaHistoryIndex = 0; // most recently written
+    uint32_t taaFrameNumber = 0;
+    int lastSubmittedFrame = -1;
     VkDescriptorSet skyboxSet = VK_NULL_HANDLE;
 
     // render-graph handles for imported resources
@@ -183,7 +260,21 @@ private:
     void createGraphResources(Context& ctx);      // gbuffer + HDR + depth
     void destroyGraphResources(Context& ctx);
     void createClusterResources(Context& ctx);    // SSBOs + compute pipeline
-    void createGraphDescriptors(Context& ctx);    // gbuffer/composite/cluster sets
+    void createGraphDescriptors(Context& ctx);
+    void recordMotionPass(VkCommandBuffer cmd, VkExtent2D extent, const glm::mat4& invCurrent, const glm::mat4& prev);
+    void recordGeometryMotionPass(VkCommandBuffer cmd, VkExtent2D extent,
+        const std::vector<Model*>& models, VkDescriptorSet globalSet,
+        const glm::mat4& previousVP, bool valid);
+    void recordTransparentMotionPass(VkCommandBuffer cmd, VkExtent2D extent,
+        const std::vector<Model*>& models, VkDescriptorSet globalSet,
+        const glm::mat4& previousVP, bool valid);
+    void recordSSRTemporalPass(VkCommandBuffer cmd, VkExtent2D extent, uint32_t dst, bool valid, const glm::mat4& currentToPreviousClip);
+    void recordSSGIDenoisePass(VkCommandBuffer cmd, VkExtent2D extent, const glm::mat4& invProj);
+    void recordSSGICombinePass(VkCommandBuffer cmd, VkExtent2D extent);
+    void recordSSGITemporalPass(VkCommandBuffer cmd, VkExtent2D extent, uint32_t dst, bool valid, const glm::mat4& currentToPreviousClip);
+    void recordSSGITracePass(VkCommandBuffer cmd, VkExtent2D extent, const glm::mat4& invProj);
+    void recordSSRPass(VkCommandBuffer cmd, VkExtent2D extent, bool combine, const glm::mat4& invProj);
+    void recordTAAPass(VkCommandBuffer cmd, VkExtent2D extent, uint32_t dst, bool valid, bool hasTransparency);    // gbuffer/composite/cluster sets
     void registerGraphResources(Context& ctx);    // import everything into the graph
 
     // --- frame recording ---
@@ -209,6 +300,13 @@ private:
 
     void recordGBufferPass(VkCommandBuffer cmd, const std::vector<Model*>& models,
         VkDescriptorSet globalSet, VkExtent2D extent);
+    void recordForwardAOPrepass(VkCommandBuffer cmd, const std::vector<Model*>& models,
+        VkDescriptorSet globalSet, VkExtent2D extent);
+    void recordGTAOPass(VkCommandBuffer cmd, VkDescriptorSet globalSet,
+        const glm::mat4& invProj, VkExtent2D extent);
+    void recordGTAODenoisePass(VkCommandBuffer cmd, VkDescriptorSet globalSet,
+        VkDescriptorSet inputSet, RTImage& output, const glm::mat4& invProj,
+        VkExtent2D extent, glm::vec2 direction);
     void recordDeferredLightingPass(VkCommandBuffer cmd, VkDescriptorSet globalSet,
         const glm::mat4& invViewProj, VkExtent2D extent);
     void recordSkyboxPass(VkCommandBuffer cmd, VkDescriptorSet globalSet, VkExtent2D extent);

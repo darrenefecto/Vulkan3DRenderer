@@ -10,5 +10,5 @@ if not exist "%GLSLC%" (
     exit /b 1
 )
 "%GLSLC%" "%~dp0custom.vert" -o "%~dp0custom.vert.spv" || exit /b 1
-"%GLSLC%" "%~dp0custom.frag" -o "%~dp0custom.frag.spv" || exit /b 1
+"%GLSLC%" -I"%~dp0..\Shaders" "%~dp0custom.frag" -o "%~dp0custom.frag.spv" || exit /b 1
 echo Custom shaders compiled.

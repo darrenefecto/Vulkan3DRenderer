@@ -2,6 +2,31 @@
 #include <cstring>
 #include <algorithm>
 #include <iostream>
+#include <cstdlib>
+#include <stdexcept>
+
+namespace {
+VKAPI_ATTR VkBool32 VKAPI_CALL validationCallback(
+    VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+    VkDebugUtilsMessageTypeFlagsEXT,
+    const VkDebugUtilsMessengerCallbackDataEXT* data,
+    void*) {
+    std::cerr << "[Vulkan Validation] "
+              << ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) ? "ERROR" : "WARNING")
+              << ": " << (data && data->pMessage ? data->pMessage : "(no message)") << '\n';
+    return VK_FALSE;
+}
+VkDebugUtilsMessengerCreateInfoEXT debugMessengerInfo() {
+    VkDebugUtilsMessengerCreateInfoEXT info{VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT};
+    info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+        VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+    info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+        VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+        VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+    info.pfnUserCallback = validationCallback;
+    return info;
+}
+}
 
 void Context::init(GLFWwindow* win, bool validation) {
     window = win;
@@ -29,23 +54,63 @@ void Context::createInstance(bool validation) {
     std::vector<const char*> extensions(glfwExt, glfwExt + glfwCount);
 
     std::vector<const char*> layers;
+    validationActive = false;
     if (validation) {
         uint32_t count = 0;
-        vkEnumerateInstanceLayerProperties(&count, nullptr);
+        VK_CHECK(vkEnumerateInstanceLayerProperties(&count, nullptr));
         std::vector<VkLayerProperties> available(count);
-        vkEnumerateInstanceLayerProperties(&count, available.data());
-        for (auto& l : available)
+        VK_CHECK(vkEnumerateInstanceLayerProperties(&count, available.data()));
+        for (const auto& l : available)
             if (std::strcmp(l.layerName, "VK_LAYER_KHRONOS_validation") == 0)
-                layers.push_back("VK_LAYER_KHRONOS_validation");
+                validationActive = true;
+        if (!validationActive)
+            throw std::runtime_error("VK_LAYER_KHRONOS_validation requested but not installed");
+        layers.push_back("VK_LAYER_KHRONOS_validation");
     }
+    // Enable synchronization validation only when explicitly requested.
+    bool syncValidation = false;
+    if (validationActive) {
+#ifdef _MSC_VER
+        char* envVal = nullptr;
+        size_t envLen = 0;
+        if (_dupenv_s(&envVal, &envLen, "VULKAN_SYNC_VALIDATION") == 0 && envVal) {
+            syncValidation = (std::strcmp(envVal, "1") == 0);
+            free(envVal);
+        }
+#else
+        const char* envVal = std::getenv("VULKAN_SYNC_VALIDATION");
+        syncValidation = (envVal && std::strcmp(envVal, "1") == 0);
+#endif
+    }
+    VkValidationFeatureEnableEXT syncFeature = VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT;
+    VkValidationFeaturesEXT features{VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT};
 
+    if (validationActive) {
+        extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+        if (syncValidation) {
+            extensions.push_back(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME);
+            features.enabledValidationFeatureCount = 1;
+            features.pEnabledValidationFeatures = &syncFeature;
+        }
+    }
+    auto debugInfo = debugMessengerInfo();
     VkInstanceCreateInfo ci{ VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO };
     ci.pApplicationInfo = &app;
+    ci.pNext = syncValidation ? static_cast<const void*>(&features) :
+        (validationActive ? static_cast<const void*>(&debugInfo) : nullptr);
     ci.enabledExtensionCount = (uint32_t)extensions.size();
     ci.ppEnabledExtensionNames = extensions.data();
     ci.enabledLayerCount = (uint32_t)layers.size();
     ci.ppEnabledLayerNames = layers.data();
     VK_CHECK(vkCreateInstance(&ci, nullptr, &instance));
+    if (validationActive) {
+        auto create = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
+            vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT"));
+        if (!create) throw std::runtime_error("vkCreateDebugUtilsMessengerEXT unavailable");
+        VK_CHECK(create(instance, &debugInfo, nullptr, &debugMessenger));
+        std::cerr << "[Vulkan Validation] enabled; synchronization validation: "
+                  << (syncValidation ? "ON" : "OFF") << '\n';
+    }
 }
 
 struct SwapchainSupport {
@@ -307,6 +372,12 @@ void Context::shutdown() {
     vkDestroyCommandPool(device, commandPool, nullptr);
     vkDestroyDevice(device, nullptr);
     vkDestroySurfaceKHR(instance, surface, nullptr);
+    if (debugMessenger != VK_NULL_HANDLE) {
+        auto destroy = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
+            vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT"));
+        if (destroy) destroy(instance, debugMessenger, nullptr);
+        debugMessenger = VK_NULL_HANDLE;
+    }
     vkDestroyInstance(instance, nullptr);
 }
 

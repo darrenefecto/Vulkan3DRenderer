@@ -1,4 +1,5 @@
 #version 460
+#extension GL_GOOGLE_include_directive : require
 
 #define NUM_CASCADES 4
 #define MAX_POINT 8
@@ -44,12 +45,17 @@ layout(set = 0, binding = 0, std140) uniform Global {
 } g;
 
 layout(set = 0, binding = 1) uniform samplerCube envMap;
+layout(set = 0, binding = 6) uniform samplerCube diffuseIrradianceMap;
+layout(set = 0, binding = 7) uniform samplerCube specularPrefilterMap;
+layout(set = 0, binding = 8) uniform sampler2D brdfLutMap;
 layout(set = 0, binding = 2) uniform sampler2DArrayShadow csmShadow;
 layout(set = 0, binding = 3) uniform sampler2DArrayShadow spotShadow;
 layout(set = 0, binding = 4) uniform samplerCubeArrayShadow pointShadow;
 layout(set = 0, binding = 5) uniform sampler2DArrayShadow areaShadow;
 
 // Must match MaterialData in Mesh.h (std140).
+layout(set = 2, binding = 0) uniform sampler2D gtaoTexture;
+
 layout(set = 1, binding = 0, std140) uniform MaterialUBO {
     vec4 baseColor;
     vec4 emissive;
@@ -96,11 +102,14 @@ float geometrySmith(vec3 N, vec3 V, vec3 L, float roughness) {
            geometrySchlickGGX(max(dot(N, L), 0.0), roughness);
 }
 
+#include "ibl_runtime.glsl"
+
 // One analytic light contribution. radiance = color*intensity at the fragment.
 vec3 evalLight(vec3 radiance, vec3 L, vec3 N, vec3 V, vec3 albedo,
                float metallic, float roughness, vec3 F0) {
+    roughness = clamp(roughness, 0.045, 1.0);
     float NdotL = dot(N, L);
-    if (NdotL <= 0.0) return vec3(0.0);
+    if (NdotL <= 0.0 || dot(N, V) <= 0.0) return vec3(0.0);
     vec3 H = normalize(V + L);
     float NDF = distributionGGX(N, H, roughness);
     float G = geometrySmith(N, V, L, roughness);
@@ -336,15 +345,12 @@ void main() {
         }
     }
 
-    // ---- ambient: IBL from the skybox cubemap + flat fallback ----
-    vec3 R = reflect(-V, N);
-    float maxLod = g.skyParams.x;
-    vec3 F = fresnelSchlickRoughness(max(dot(N, V), 0.0), F0, roughness);
-    vec3 irradiance = textureLod(envMap, N, maxLod).rgb;
-    vec3 prefiltered = textureLod(envMap, R, roughness * maxLod).rgb;
-    vec3 kD = (vec3(1.0) - F) * (1.0 - metallic);
-    vec3 ibl = (kD * irradiance * albedo + prefiltered * F) * g.ambient.w;
-    vec3 ambient = (ibl + g.ambient.rgb * albedo) * ao;
+    // Consistent runtime diffuse/GGX IBL and split-sum BRDF, same as deferred.
+    ivec2 aoSize = textureSize(gtaoTexture, 0);
+    ivec2 aoPixel = clamp(ivec2(gl_FragCoord.xy), ivec2(0), aoSize - 1);
+    float screenAO = clamp(texelFetch(gtaoTexture, aoPixel, 0).r, 0.0, 1.0);
+    vec3 ambient = iblLighting(N, V, albedo, metallic, roughness,
+                               ao * screenAO, g.ambient.w, g.ambient.rgb, g.skyParams.x);
 
     // ---- emissive ----
     vec3 emissive = m.emissive.rgb;

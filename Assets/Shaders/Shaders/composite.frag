@@ -24,6 +24,6 @@ vec3 tonemap(vec3 hdr, int op) {
 }
 
 void main() {
-    vec3 hdr = texture(sceneColor, uv).rgb * pc.params.x;
+    vec3 hdr = max(texture(sceneColor, uv).rgb * max(pc.params.x, 0.0), vec3(0.0));
     outColor = vec4(tonemap(hdr, int(pc.params.y + 0.5)), 1.0);
 }

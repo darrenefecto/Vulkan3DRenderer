@@ -185,6 +185,9 @@
     <ClInclude Include="Vulkan3DRenderer\Include\Vulkan3DRenderer\VulkanContext.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <Target Name="CompileRendererShaders" BeforeTargets="PrepareForBuild">
+    <Exec Command="call &quot;$(ProjectDir)Assets\Shaders\Shaders\Compiler.bat&quot; /nopause" WorkingDirectory="$(ProjectDir)" />
+  </Target>
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>
 </Project>
